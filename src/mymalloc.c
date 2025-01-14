@@ -30,6 +30,9 @@ void debug_dump_state(void);
 void validate_heap(void);
 void set_allocated(Block *block, bool allocated);
 void set_block_size(Block *block, size_t size);
+void set_footer(Block *block);
+Block *get_prev_block(Block *block);
+void coalesce_block(Block* block);
 
 typedef struct Fence_post {
   size_t magic;
@@ -129,7 +132,7 @@ bool has_enough_space(size_t size) {
 
 Block* split_block(Block* block, size_t size) {
   // Calculate remaining size
-  size_t total_size = size + kMetadataSize;
+  size_t total_size = size + kMetadataSize + sizeof(size_t);
   total_size = (total_size > sizeof(Block)) ? total_size : sizeof(Block);
   size_t leftover_size = block_size(block) - total_size;
 
@@ -240,7 +243,7 @@ void my_free(void *ptr) {
   
   set_allocated(block, false);
   add_to_free_list(block);
-  coalesce();
+  coalesce_block(block);
   debug_dump_state();
   validate_heap();
 }
@@ -261,6 +264,25 @@ void coalesce() {
       // move to next block only if we didn't coalesce
       curr_block = curr_block->free_list.next_free;
     }
+  }
+}
+
+void coalesce_block(Block* block) {
+  Block *prev = get_prev_block(block);
+
+  if (prev && prev->chunk == block->chunk && is_free(prev)) {
+    // merge blocks
+    size_t prev_size = block_size(prev);
+    size_t curr_size = block_size(block);
+    set_block_size(prev, prev_size + curr_size);
+    remove_from_free_list(block);
+    block = prev;  // Update our reference to the merged block
+  }
+
+  Block *next = get_next_block(block);
+  if (next && next->chunk == block->chunk && is_free(next)) {
+    set_block_size(block, block_size(next) + block_size(block));
+    remove_from_free_list(next);
   }
 }
 
@@ -441,4 +463,28 @@ void set_block_size(Block *block, size_t size) {
   if (was_allocated) {
     block->size |= ALLOC_BIT;
   }
+
+  set_footer(block);
+}
+
+void set_footer(Block* block) {
+  // we want to set the footer at the very end
+  // we use size_t as the footer - why? because we store
+  // the size and allocated also using size_t in the header
+  size_t* footer_loc = (size_t*)((char*) block + block_size(block) - sizeof(size_t));
+  // now we copy the header
+  *footer_loc = block->size;
+}
+
+Block* get_prev_block(Block* block) {
+  // check block - 1, it's either a fencepost or a boundary tag
+  size_t* prev_footer = (size_t*)((char*) block - sizeof(size_t));
+  size_t prev_size = (*prev_footer & SIZE_MASK);
+  Fence_post* maybe_fence = (Fence_post*)((char*) block - sizeof(Fence_post));
+
+  if (maybe_fence->magic == FENCEPOST_MAGIC) {
+    return NULL; // reach the fence
+  }
+
+  return (Block*)((char*) block - prev_size);
 }

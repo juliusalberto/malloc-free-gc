@@ -33,6 +33,7 @@ struct Block {
   size_t size;
   // Is the block allocated or not?
   // The chunk that this block is located
+  bool allocated;
   Chunk* chunk;
   union {
     // when block is allocated, this space gets used for user data
@@ -43,7 +44,6 @@ struct Block {
       struct Block* prev_free;
     } free_list;
   };
-  size_t footer;
 };
 
 // Word alignment

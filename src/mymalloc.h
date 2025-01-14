@@ -16,6 +16,11 @@
 
 #define ADD_BYTES(ptr, n) ((void *) (((char *) (ptr)) + (n)))
 
+typedef struct Chunk {
+  size_t size;
+  struct Chunk* next;
+} Chunk;
+
 
 /** This is the Block struct, which contains all metadata needed for your 
  *  explicit free list. You are allowed to modify this struct (and will need to 
@@ -26,11 +31,18 @@ typedef struct Block Block;
 struct Block {
   // Size of the block, including meta-data size.
   size_t size;
-  // Next and Prev blocks
-  Block *next;
-  Block *prev;
   // Is the block allocated or not?
-  bool allocated;
+  // The chunk that this block is located
+  Chunk* chunk;
+  union {
+    // when block is allocated, this space gets used for user data
+    char data[0];  
+    // when block is free, we use these pointers
+    struct {
+      struct Block* next_free;
+      struct Block* prev_free;
+    } free_list;
+  };
 };
 
 // Word alignment

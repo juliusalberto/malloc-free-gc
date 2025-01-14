@@ -14,6 +14,24 @@
 
 char *ptrs[NUM_PTRS];
 
+size_t peak_allocated = 0;
+size_t peak_payload = 0;
+size_t curr_allocated = 0;
+size_t curr_payload = 0;
+
+static void update_stats(void) {
+  curr_allocated = 0;
+  curr_payload = 0;
+  for (Block* b = get_start_block(); b; b = get_next_block(b)) {
+    if (!is_free(b)) {
+      curr_allocated += b->size;
+      curr_payload += b->size - kMetadataSize;
+    }
+  }
+  peak_allocated = (curr_allocated > peak_allocated) ? curr_allocated : peak_allocated;
+  peak_payload = (curr_payload > peak_payload) ? curr_payload : peak_payload;
+}
+
 /* Returns a random number between min and max (inclusive) */
 int random_in_range(int min, int max) {
   return min + rand() / (RAND_MAX / (max - min + 1) + 1);
@@ -26,6 +44,7 @@ void random_allocations() {
     if (ptrs[idx] == NULL) {
       size_t random_size = (size_t) random_in_range(0, MAX_ALLOC_SIZE);
       ptrs[idx] = my_malloc(random_size);
+      update_stats();
     } else {
       my_free(ptrs[idx]);
       ptrs[idx] = NULL;
@@ -49,6 +68,13 @@ int main(int argc, char const *argv[]) {
   fprintf(stderr, "Running fragmentation test with random seed: %u\n", seed);
   srand(seed);
   random_allocations(); 
+
+  double peak_util = ((double)peak_payload / peak_allocated) * 100;
+  printf("peak stats:\n");
+  printf("  allocated: %zu bytes\n", peak_allocated);
+  printf("  payload:   %zu bytes\n", peak_payload);
+  printf("  util:      %.2f%%\n", peak_util);
+  printf("  waste:     %.2f%%\n", 100.0 - peak_util);
 
   /* TODO: put your code to measure and report memory fragmentation here */
 

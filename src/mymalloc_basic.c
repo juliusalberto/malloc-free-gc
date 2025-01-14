@@ -6,13 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <stddef.h>
 #define FENCEPOST_MAGIC 0xDEADBEEF
 #define RED "\033[31m"
 #define GREEN "\033[32m"
 #define RESET "\033[0m"
-#define SIZE_MASK (~7UL) 
-#define ALLOC_BIT (1UL)
 
 void add_to_free_list(Block* block);
 inline static size_t round_up(size_t size, size_t alignment);
@@ -25,11 +22,7 @@ Block *get_next_block(Block *block);
 Block* find_free_block(size_t size);
 Block* find_first_block_in_chunk(Chunk* chunk);
 bool has_enough_space(size_t size);
-void coalesce(void);
-void debug_dump_state(void);
-void validate_heap(void);
-void set_allocated(Block *block, bool allocated);
-void set_block_size(Block *block, size_t size);
+void coalesce();
 
 typedef struct Fence_post {
   size_t magic;
@@ -41,7 +34,7 @@ const size_t kAlignment = sizeof(size_t);
 // Minimum allocation size (1 word)
 const size_t kMinAllocationSize = kAlignment;
 // Size of meta-data per Block
-const size_t kMetadataSize = offsetof(Block, data);
+const size_t kMetadataSize = sizeof(Block);
 // Maximum allocation size (128 MB)
 const size_t kMaxAllocationSize = (128ull << 20) - kMetadataSize - 2 * sizeof(Fence_post) - sizeof(Chunk);
 // Memory size that is mmapped (64 MB)
@@ -51,6 +44,51 @@ const size_t kMemorySize = (64ull << 20);
 static void *gFirstChunk = NULL;
 static void* gLastChunk = NULL;
 static Block* free_list_head = NULL;
+
+void debug_dump_state() {
+  LOG("--- HEAP STATE ---\n");
+  Chunk* c = gFirstChunk;
+  while (c) {
+    LOG("chunk %p size %zu\n", c, c->size);
+    Block* b = find_first_block_in_chunk(c);
+    while (b) {
+      LOG("  block %p size %zu %s\n", b, b->size, 
+             b->allocated ? "alloc" : "free");
+      b = get_next_block(b);
+    }
+    c = c->next;
+  }
+  LOG("free list: ");
+  Block* f = free_list_head;
+  while (f) {
+    LOG("%p -> ", f);
+    f = f->free_list.next_free;
+  }
+  LOG("NULL\n");
+}
+
+void validate_heap() {
+  size_t total_size = 0;
+  Block* prev = NULL;
+  
+  for (Chunk* c = gFirstChunk; c; c = c->next) {
+    Block* b = find_first_block_in_chunk(c);
+    while (b) {
+      if ((void*)b >= (void*)c + c->size) {
+        LOG("CORRUPTED: block %p outside chunk bounds\n", b);
+        abort();
+      }
+      if (b->chunk != c) {
+        LOG("CORRUPTED: block %p wrong chunk ptr\n", b);
+        abort();
+      }
+      total_size += b->size;
+      prev = b;
+      b = get_next_block(b);
+    }
+  }
+}
+
 
 void *my_malloc(size_t size) {
   // 1. we want to request a chunk of memory using mmap
@@ -81,8 +119,8 @@ void *my_malloc(size_t size) {
     size_t usable_size = new_chunk->size - 2 * sizeof(Fence_post) - sizeof(Chunk);
     Block* block = (Block*)((char*) new_chunk + sizeof(Chunk) + sizeof(Fence_post));
     // LOG("[MAIN] Block address: %p\n", block);
-    set_block_size(block, usable_size);
-    set_allocated(block, false);
+    block->size = usable_size;
+    block->allocated = false;
     block->chunk = new_chunk;
     add_to_free_list(block);
     // LOG("[MAIN] Block sizes: %zu\n", usable_size);
@@ -102,15 +140,15 @@ void *my_malloc(size_t size) {
 
   // if free block full size is bigger than
   // current size (excluding metadata) + this block size + new block size + min allocation size for new block
-  if (block_size(free_block) > size + 2 * kMetadataSize + kMinAllocationSize) {
+  if (free_block->size > size + 2 * kMetadataSize + kMinAllocationSize) {
       Block* allocated_block = split_block(free_block, size);
-      set_allocated(allocated_block, true);
+      allocated_block->allocated = true;
       debug_dump_state();
       validate_heap();
       return (void*)((char*) allocated_block + kMetadataSize);
   } else {
     remove_from_free_list(free_block);
-    set_allocated(free_block, true);
+    free_block->allocated = true;
     debug_dump_state();
     validate_heap();
     return (void*)((char*) free_block + kMetadataSize);
@@ -130,35 +168,26 @@ bool has_enough_space(size_t size) {
 Block* split_block(Block* block, size_t size) {
   // Calculate remaining size
   size_t total_size = size + kMetadataSize;
-  total_size = (total_size > sizeof(Block)) ? total_size : sizeof(Block);
   size_t leftover_size = block_size(block) - total_size;
+  // LOG("--------------------------------------------------\n");
+  // LOG("[SPLIT_BLOCK] total size: %zu\n", total_size);
+  // LOG("[SPLIT_BLOCK] leftover size: %zu\n", leftover_size);
 
-  if (leftover_size < sizeof(Block)) {
+  if (leftover_size < kMetadataSize + kMinAllocationSize) {
     // if too smol, just allocate the whole block
-    set_allocated(block, true);
+    block->allocated = true;
     remove_from_free_list(block);
     return block;
   }
 
   Block* new_block = (Block*)((char*) block + leftover_size);
+  // LOG("[SPLIT_BLOCK] New block address: %p\n", new_block);
 
-  set_block_size(block, leftover_size);
-  set_block_size(new_block, total_size);
-  set_allocated(new_block, true);
+  block->size = leftover_size;
+  new_block->size = total_size;
+  new_block->allocated = true;
   new_block->chunk = block->chunk;
   // LOG("[SPLIT_BLOCK] New block chunk: %p\n", new_block->chunk);
-  LOG("--------------------------------------------------\n");
-  LOG("[SPLIT] Original block size: %zu\n", block_size(block));
-  LOG("[SPLIT] Total size for new block: %zu\n", total_size);
-  LOG("[SPLIT] Leftover size: %zu\n", leftover_size);
-  LOG("[SPLIT] End of chunk boundary: %p\n", (char*)block->chunk + block->chunk->size);
-  LOG("[SPLIT_BLOCK] New block address: %p\n", new_block);
-  LOG("[SPLIT] End of new block: %p\n", (char*)new_block + total_size);
-  LOG("[SPLIT] Block %p: next_free=%p, prev_free=%p\n", new_block, &new_block->free_list.next_free, &new_block->free_list.prev_free);
-  LOG("[SPLIT] Data offset: %zu\n", offsetof(Block, data));
-  LOG("[SPLIT] Free list offset: %zu\n", offsetof(Block, free_list));
-  LOG("--------------------------------------------------\n");
-
   return new_block;
 }
 
@@ -238,7 +267,7 @@ void my_free(void *ptr) {
   Block* block = ptr_to_block(ptr);
   if (block->chunk != curr_chunk) return;  // metadata corrupted
   
-  set_allocated(block, false);
+  block->allocated = false;
   add_to_free_list(block);
   coalesce();
   debug_dump_state();
@@ -253,9 +282,7 @@ void coalesce() {
     
     if (next_block && next_block->chunk == curr_block->chunk && is_free(next_block)) {
       // merge blocks
-      size_t curr_block_size = block_size(curr_block);
-      size_t next_block_size = block_size(next_block);
-      set_block_size(curr_block, curr_block_size + next_block_size);
+      curr_block->size += next_block->size;
       remove_from_free_list(next_block);
     } else {
       // move to next block only if we didn't coalesce
@@ -271,15 +298,12 @@ void coalesce() {
 
 /* Returns 1 if the given block is free, 0 if not. */
 int is_free(Block *block) {
-  // return the last bit in size
-  // if bit is 1 -> means it is allocated
-  // therefore it is not free
-  return !(block->size & ALLOC_BIT);
+  return !block->allocated;
 }
 
 /* Returns the size of the given block */
 size_t block_size(Block *block) {
-  return block->size & SIZE_MASK;
+  return block->size;
 }
 
 /* Returns the first block in memory (excluding fenceposts) */
@@ -296,12 +320,10 @@ Block *get_next_block(Block *block) {
   // OK so we have a block w/ the sizes in it
   Block* next = (Block*) ((char*) block + block_size(block));
   // LOG("--------------------------------------------------\n");
-  LOG("[GET_NEXT_BLOCK] curr block address: %p\n", block);
+  // LOG("[GET_NEXT_BLOCK] curr block address: %p\n", block);
   // LOG("[GET_NEXT_BLOCK] curr block size: %zu\n", block_size(block));
-  LOG("[GET_NEXT_BLOCK] next block address: %p\n", next);
+  // LOG("[GET_NEXT_BLOCK] next block address: %p\n", next);
   Fence_post* maybe_fence = (Fence_post*)(next);
-  LOG("[GET_NEXT_BLOCK] next maybe fence address: %p\n", maybe_fence);
-  LOG("[GET_NEXT_BLOCK] next maybe fence magic: %zu\n", maybe_fence->magic);
 
   void* chunk_end = (char*)block->chunk + block->chunk->size;
   // LOG("[GET_NEXT_BLOCK] next block %p, chunk bound: %p\n", next, chunk_end);
@@ -342,7 +364,6 @@ void add_to_free_list(Block* block) {
   */
 
  // First we set the new block next to point to the current head
- LOG("Block %p: next_free=%p, prev_free=%p\n", block, &block->free_list.next_free, &block->free_list.prev_free);
  block->free_list.next_free = free_list_head;
  block->free_list.prev_free = NULL;
  if (free_list_head) {
@@ -352,7 +373,7 @@ void add_to_free_list(Block* block) {
  }
 
  free_list_head = block;
- set_allocated(block, false);
+ block->allocated = false;
 }
 
 
@@ -363,8 +384,8 @@ Block* find_free_block(size_t size) {
   Block* curr_pointer = free_list_head;
 
   while (curr_pointer != NULL) {
-    if (block_size(curr_pointer) >= size + kMetadataSize) {
-      if (best_pointer == NULL || block_size(best_pointer) > block_size(curr_pointer)) {
+    if (curr_pointer->size >= size + kMetadataSize) {
+      if (best_pointer == NULL || best_pointer->size > curr_pointer->size) {
         best_pointer = curr_pointer;
       } 
     }
@@ -377,68 +398,4 @@ Block* find_free_block(size_t size) {
 inline static size_t round_up(size_t size, size_t alignment) {
   const size_t mask = alignment - 1;
   return (size + mask) & ~mask;
-}
-
-void debug_dump_state() {
-  LOG("--- HEAP STATE ---\n");
-  Chunk* c = gFirstChunk;
-  while (c) {
-    LOG("chunk %p size %zu\n", c, c->size);
-    Block* b = find_first_block_in_chunk(c);
-    while (b) {
-      LOG("  block %p size %zu %s\n", b, block_size(b), 
-             !is_free(block) ? "alloc" : "free");
-      b = get_next_block(b);
-    }
-    c = c->next;
-  }
-  LOG("free list: ");
-  Block* f = free_list_head;
-  while (f) {
-    LOG("%p -> ", f);
-    f = f->free_list.next_free;
-  }
-  LOG("NULL\n");
-}
-
-void validate_heap() {
-  size_t total_size = 0;
-  Block* prev = NULL;
-  
-  for (Chunk* c = gFirstChunk; c; c = c->next) {
-    Block* b = find_first_block_in_chunk(c);
-    while (b) {
-      if ((void*)b >= (void*)c + c->size) {
-        LOG("CORRUPTED: block %p outside chunk bounds\n", b);
-        abort();
-      }
-      if (b->chunk != c) {
-        LOG("CORRUPTED: block %p wrong chunk ptr\n", b);
-        abort();
-      }
-      total_size += block_size(b);
-      prev = b;
-      b = get_next_block(b);
-    }
-  }
-}
-
-void set_allocated(Block *block, bool allocated) {
-  if (allocated) {
-    // we want to set the last bit to 1
-    block->size = block->size |= ALLOC_BIT;
-  } else {
-    // we want to set the last bit to 0
-    block->size &= ~ALLOC_BIT;
-  }
-}
-
-void set_block_size(Block *block, size_t size) {
-  bool was_allocated = !is_free(block);
-  size_t aligned_size = round_up(size, 8);
-  block->size = (aligned_size & SIZE_MASK);
-
-  if (was_allocated) {
-    block->size |= ALLOC_BIT;
-  }
 }

@@ -43,7 +43,6 @@ struct Block {
       struct Block* prev_free;
     } free_list;
   };
-  size_t footer;
 };
 
 // Word alignment

@@ -13,6 +13,12 @@
 #define RESET "\033[0m"
 #define SIZE_MASK (~7UL) 
 #define ALLOC_BIT (1UL)
+#define GET_FOOTER_SIZE(b) (*(size_t*)((char*)b + block_size(b) - sizeof(size_t)) & SIZE_MASK)
+#define LOG_BLOCK(prefix, b) \
+    LOG("[%s] Block %p: size=%zu, allocated=%d, next_free=%p, prev_free=%p, footer=%zu\n", \
+        prefix, b, block_size(b), !is_free(b), \
+        b->free_list.next_free, b->free_list.prev_free, \
+        GET_FOOTER_SIZE(b))
 
 void add_to_free_list(Block* block);
 inline static size_t round_up(size_t size, size_t alignment);
@@ -33,6 +39,8 @@ void set_block_size(Block *block, size_t size);
 void set_footer(Block *block);
 Block *get_prev_block(Block *block);
 void coalesce_block(Block* block);
+size_t get_list_index(size_t size);
+
 
 typedef struct Fence_post {
   size_t magic;
@@ -44,16 +52,20 @@ const size_t kAlignment = sizeof(size_t);
 // Minimum allocation size (1 word)
 const size_t kMinAllocationSize = kAlignment;
 // Size of meta-data per Block
+// Block - data + boundary tag 
 const size_t kMetadataSize = offsetof(Block, data);
+const size_t kBoundarySize = sizeof(size_t);
 // Maximum allocation size (128 MB)
-const size_t kMaxAllocationSize = (128ull << 20) - kMetadataSize - 2 * sizeof(Fence_post) - sizeof(Chunk);
+const size_t kMaxAllocationSize = (128ull << 20) - kMetadataSize - kBoundarySize - 2 * sizeof(Fence_post) - sizeof(Chunk);
 // Memory size that is mmapped (64 MB)
 const size_t kMemorySize = (64ull << 20);
+
 
 
 static void *gFirstChunk = NULL;
 static void* gLastChunk = NULL;
 static Block* free_list_head = NULL;
+Block* free_lists[N_LISTS] = {NULL};
 
 void *my_malloc(size_t size) {
   // 1. we want to request a chunk of memory using mmap
@@ -70,6 +82,8 @@ void *my_malloc(size_t size) {
   if (size > kMaxAllocationSize) {
     return NULL;
   }
+
+  // LOG("[MALLOC] malloc for size %zu\n", size);
 
   // round up the code first
   size = round_up(size, kAlignment);
@@ -88,7 +102,7 @@ void *my_malloc(size_t size) {
     set_allocated(block, false);
     block->chunk = new_chunk;
     add_to_free_list(block);
-    // LOG("[MAIN] Block sizes: %zu\n", usable_size);
+    // LOG("[MAIN] Block chunk: %p\n", new_chunk);
 
     if (!gFirstChunk) {
       gFirstChunk = new_chunk;
@@ -105,17 +119,18 @@ void *my_malloc(size_t size) {
 
   // if free block full size is bigger than
   // current size (excluding metadata) + this block size + new block size + min allocation size for new block
-  if (block_size(free_block) > size + 2 * kMetadataSize + kMinAllocationSize) {
+  if (block_size(free_block) > size + 2 * kMetadataSize + 2 * kBoundarySize + kMinAllocationSize) {
       Block* allocated_block = split_block(free_block, size);
+      remove_from_free_list(allocated_block);
       set_allocated(allocated_block, true);
-      debug_dump_state();
-      validate_heap();
+      // debug_dump_state();
+      // validate_heap();
       return (void*)((char*) allocated_block + kMetadataSize);
   } else {
     remove_from_free_list(free_block);
     set_allocated(free_block, true);
-    debug_dump_state();
-    validate_heap();
+    // debug_dump_state();
+    // validate_heap();
     return (void*)((char*) free_block + kMetadataSize);
   }
 
@@ -132,14 +147,20 @@ bool has_enough_space(size_t size) {
 
 Block* split_block(Block* block, size_t size) {
   // Calculate remaining size
-  size_t total_size = size + kMetadataSize + sizeof(size_t);
-  total_size = (total_size > sizeof(Block)) ? total_size : sizeof(Block);
+  remove_from_free_list(block);
+  size_t total_size = size + kMetadataSize + kBoundarySize;
+  size_t original_size = block_size(block);
+  total_size = (total_size > sizeof(Block) + kBoundarySize) ? total_size : sizeof(Block) + kBoundarySize;
   size_t leftover_size = block_size(block) - total_size;
+  if (leftover_size == (size_t) 672) {
+    printf("This");
+  }
 
   if (leftover_size < sizeof(Block)) {
     // if too smol, just allocate the whole block
+    // LOG("[SPLIT] Too small, return block");
+    // LOG("Block next list: %p")
     set_allocated(block, true);
-    remove_from_free_list(block);
     return block;
   }
 
@@ -149,18 +170,24 @@ Block* split_block(Block* block, size_t size) {
   set_block_size(new_block, total_size);
   set_allocated(new_block, true);
   new_block->chunk = block->chunk;
+  new_block->free_list.next_free = NULL;
+  new_block->free_list.prev_free = NULL;
   // LOG("[SPLIT_BLOCK] New block chunk: %p\n", new_block->chunk);
-  LOG("--------------------------------------------------\n");
-  LOG("[SPLIT] Original block size: %zu\n", block_size(block));
-  LOG("[SPLIT] Total size for new block: %zu\n", total_size);
-  LOG("[SPLIT] Leftover size: %zu\n", leftover_size);
-  LOG("[SPLIT] End of chunk boundary: %p\n", (char*)block->chunk + block->chunk->size);
-  LOG("[SPLIT_BLOCK] New block address: %p\n", new_block);
-  LOG("[SPLIT] End of new block: %p\n", (char*)new_block + total_size);
-  LOG("[SPLIT] Block %p: next_free=%p, prev_free=%p\n", new_block, &new_block->free_list.next_free, &new_block->free_list.prev_free);
-  LOG("[SPLIT] Data offset: %zu\n", offsetof(Block, data));
-  LOG("[SPLIT] Free list offset: %zu\n", offsetof(Block, free_list));
-  LOG("--------------------------------------------------\n");
+  // LOG("--------------------------------------------------\n");
+  // LOG("[SPLIT] Original block address: %p\n", block);
+  // LOG("[SPLIT] Original block chunk: %p\n", block->chunk);
+  // LOG("[SPLIT] Original block size: %zu\n", original_size);
+  // LOG("[SPLIT] Total size for new block: %zu\n", total_size);
+  // LOG("[SPLIT] Leftover size: %zu\n", leftover_size);
+  // LOG("[SPLIT] End of chunk boundary: %p\n", (char*)block->chunk + block->chunk->size);
+  // if ((new_block > (char*)block->chunk + block->chunk->size)) {
+  //   LOG("[SPLIT PANIK] SPLITTED BLOCK LOCATED AHEAD OF CHUNK\n");
+  // }
+
+  // LOG_BLOCK("[SPLIT] OLD BLOCK AFTER SPLIT", block);
+  // LOG_BLOCK("[SPLIT] NEW BLOCK AFTER SPLIT", new_block);
+  // LOG("--------------------------------------------------\n");
+  
 
   return new_block;
 }
@@ -168,7 +195,7 @@ Block* split_block(Block* block, size_t size) {
 Chunk* request_new_chunk(size_t requested_size) {
 
     // total size needed by the chunk
-    size_t required_size = requested_size + kMetadataSize + 2 * sizeof(Fence_post) + sizeof(Chunk);
+    size_t required_size = requested_size + kMetadataSize + kBoundarySize + 2 * sizeof(Fence_post) + sizeof(Chunk);
     size_t chunk_size;
     
     if (required_size > kMemorySize) {
@@ -196,31 +223,39 @@ Chunk* request_new_chunk(size_t requested_size) {
 
     // LOG("Chunk size: %zu\n", sizeof(Chunk));
     // LOG("Fence size: %zu\n", sizeof(Fence_post));
-    LOG("Header at: %p\n", header);
-    LOG("Start fence at: %p\n", start_fence);
-    LOG("End fence at: %p\n", end_fence);
-    LOG("[REQ_NEW_CHUNK]: First block at: %p\n", (char*)(start_fence + 1));
-    LOG("[REQ_NEW_CHUNK] chunk_size: %zu\n", chunk_size);
+    // LOG("Header at: %p\n", header);
+    // LOG("Start fence at: %p\n", start_fence);
+    // LOG("End fence at: %p\n", end_fence);
+    // LOG("[REQ_NEW_CHUNK]: First block at: %p\n", (char*)(start_fence + 1));
+    // LOG("[REQ_NEW_CHUNK] chunk_size: %zu\n", chunk_size);
 
         // the usable size is kMemorySize - 2 fence post - sizeof(Chunk)
     return new_chunk;
 }
 
 void remove_from_free_list(Block* block) {
+  size_t index = get_list_index(block_size(block));
+
+  // LOG_BLOCK("[REMOVE FROM FREE LIST] before removing", block);
   if (block->free_list.prev_free) {
+    // LOG_BLOCK("[REMOVE FROM FREE LIST] before removing - prev block", block->free_list.prev_free);
     block->free_list.prev_free->free_list.next_free = block->free_list.next_free;
-  } else {
-    // block is head (because it doesn't have a prev)
-    free_list_head = block->free_list.next_free;
+    // LOG_BLOCK("[REMOVE FROM FREE LIST] after removing - prev block", block->free_list.prev_free);
+  } else if (free_lists[index] == block) {
+    // add to list
+    free_lists[index] = block->free_list.next_free;
   }
 
   if (block->free_list.next_free) {
     Block* next_block = block->free_list.next_free;
+    // LOG_BLOCK("[REMOVE FROM FREE LIST] before removing - next block", next_block);
     next_block->free_list.prev_free = block->free_list.prev_free;
+    // LOG_BLOCK("[REMOVE FROM FREE LIST] after removing - next block", next_block);
   }
 
   block->free_list.next_free = NULL;
   block->free_list.prev_free = NULL;
+  // validate_heap();
 }
 
 void my_free(void *ptr) {
@@ -239,13 +274,16 @@ void my_free(void *ptr) {
   if (!curr_chunk) return;  // ptr not in any of our chunks
   
   Block* block = ptr_to_block(ptr);
+
+  // LOG("[FREE] free for block %p with size %zu\n", block, block_size(block));
+
   if (block->chunk != curr_chunk) return;  // metadata corrupted
   
   set_allocated(block, false);
-  add_to_free_list(block);
+  // LOG_BLOCK("[MYFREE] BEFORE COALESCE", block);
   coalesce_block(block);
-  debug_dump_state();
-  validate_heap();
+  // debug_dump_state();
+  // validate_heap();
 }
 
 void coalesce() {
@@ -269,20 +307,28 @@ void coalesce() {
 
 void coalesce_block(Block* block) {
   Block *prev = get_prev_block(block);
+  Block *next = get_next_block(block);
+  size_t new_size = block_size(block);
+  Block* final_block = block; // track which block will be our result
 
+  // coalesce with prev if free
   if (prev && prev->chunk == block->chunk && is_free(prev)) {
-    // merge blocks
-    size_t prev_size = block_size(prev);
-    size_t curr_size = block_size(block);
-    set_block_size(prev, prev_size + curr_size);
-    remove_from_free_list(block);
-    block = prev;  // Update our reference to the merged block
+    new_size += block_size(prev);
+    final_block = prev;
+    // just update prev's size, don't remove from list
+    set_block_size(prev, new_size);
   }
 
-  Block *next = get_next_block(block);
+  // coalesce with next if free 
   if (next && next->chunk == block->chunk && is_free(next)) {
-    set_block_size(block, block_size(next) + block_size(block));
+    new_size += block_size(next);
     remove_from_free_list(next);
+    set_block_size(final_block, new_size);
+  }
+
+  // only add to free list if we weren't already there via prev
+  if (final_block == block) {
+    add_to_free_list(block);
   }
 }
 
@@ -317,23 +363,19 @@ Block *get_next_block(Block *block) {
   // Pointer arithmetic time
   // OK so we have a block w/ the sizes in it
   Block* next = (Block*) ((char*) block + block_size(block));
-  // LOG("--------------------------------------------------\n");
-  LOG("[GET_NEXT_BLOCK] curr block address: %p\n", block);
-  // LOG("[GET_NEXT_BLOCK] curr block size: %zu\n", block_size(block));
-  LOG("[GET_NEXT_BLOCK] next block address: %p\n", next);
   Fence_post* maybe_fence = (Fence_post*)(next);
-  LOG("[GET_NEXT_BLOCK] next maybe fence address: %p\n", maybe_fence);
-  LOG("[GET_NEXT_BLOCK] next maybe fence magic: %zu\n", maybe_fence->magic);
 
   void* chunk_end = (char*)block->chunk + block->chunk->size;
   // LOG("[GET_NEXT_BLOCK] next block %p, chunk bound: %p\n", next, chunk_end);
+  // LOG("--------------------------------------------------\n");
   if ((void*)next >= chunk_end) {
-    LOG("[PANIK] next block %p would be outside chunk bounds %p", next, chunk_end);
+    // LOG("[PANIK] next block %p would be outside chunk bounds %p\n", next, chunk_end);
     return NULL;
   }
 
   if (maybe_fence->magic == FENCEPOST_MAGIC) {
     // We're in the end of the chunk
+    // LOG("[GET_NEXT_BLOCK] AT THE END OF CHUNK\n");
     Chunk* current_chunk = block->chunk;
     if (current_chunk->next != NULL) {
       // get the next block in chunk
@@ -363,37 +405,55 @@ void add_to_free_list(Block* block) {
   OK so this is all pointer manipulation
   */
 
- // First we set the new block next to point to the current head
- LOG("Block %p: next_free=%p, prev_free=%p\n", block, &block->free_list.next_free, &block->free_list.prev_free);
- block->free_list.next_free = free_list_head;
+ size_t index = get_list_index(block_size(block));
+ block->free_list.next_free = free_lists[index];
  block->free_list.prev_free = NULL;
- if (free_list_head) {
-  // this is a double linked list
-  // need to edit the next block as well
-  free_list_head->free_list.prev_free = block;
+
+ if (free_lists[index]) {
+  free_lists[index]->free_list.prev_free = block;
  }
 
- free_list_head = block;
+ free_lists[index] = block;
+
+ // First we set the new block next to point to the current head
  set_allocated(block, false);
+//  LOG_BLOCK("[ADD_TO_FREE_LIST] after adding free list", block);
 }
 
 
 Block* find_free_block(size_t size) {
-  // basic idea: loop through the free list and then find the size
-  // that is the smallest but still bigger than the current_size
-  Block* best_pointer = NULL;
-  Block* curr_pointer = free_list_head;
-
-  while (curr_pointer != NULL) {
-    if (block_size(curr_pointer) >= size + kMetadataSize) {
-      if (best_pointer == NULL || block_size(best_pointer) > block_size(curr_pointer)) {
-        best_pointer = curr_pointer;
-      } 
-    }
-
-    curr_pointer = curr_pointer->free_list.next_free;
+  size_t index = get_list_index(size);
+  size_t start_index = index + 1;
+  if (start_index >= N_LISTS) {
+    // if the original index was already the largest list,
+    // we can't add 1. So just make start_index the last list.
+    start_index = N_LISTS - 1;
   }
-  return best_pointer;
+
+  // 1) Search from `start_index` up to the second-to-last list 
+  //    using a first-fit approach
+  for (size_t i = start_index; i < N_LISTS - 1; i++) {
+    for (Block* curr = free_lists[i]; curr; curr = curr->free_list.next_free) {
+      if (block_size(curr) >= size) {
+        // First block big enough => return immediately (first-fit)
+        return curr;
+      }
+    }
+  }
+
+  // 2) If we got here, we haven't found anything in those lists;
+  //    now we do a "best fit" in the last list
+  Block* best = NULL;
+  for (Block* curr = free_lists[N_LISTS - 1]; curr; curr = curr->free_list.next_free) {
+    size_t csize = block_size(curr);
+    if (csize >= size) {
+      if (!best || csize < block_size(best)) {
+          best = curr; // track the smallest >= size
+      }
+    }
+  }
+
+  return best;  // might be NULL if nothing is big enough
 }
 
 inline static size_t round_up(size_t size, size_t alignment) {
@@ -407,20 +467,26 @@ void debug_dump_state() {
   while (c) {
     LOG("chunk %p size %zu\n", c, c->size);
     Block* b = find_first_block_in_chunk(c);
-    while (b) {
+    while (b && b->chunk == c) {
       LOG("  block %p size %zu %s\n", b, block_size(b), 
-             !is_free(block) ? "alloc" : "free");
+             !is_free(b) ? "alloc" : "free");
       b = get_next_block(b);
     }
     c = c->next;
   }
-  LOG("free list: ");
-  Block* f = free_list_head;
-  while (f) {
-    LOG("%p -> ", f);
-    f = f->free_list.next_free;
+  LOG("Free lists:\n");
+  int j;
+  for(size_t i = 0; i < N_LISTS; i++) {
+    LOG("List %zu, size: %zu ", i, i * 8);
+    Block* f = free_lists[i];
+    j = 0;
+    while (f && j < 50) {
+        LOG("%p (size: %zu) -> ", f, f->size);
+        f = f->free_list.next_free;
+        j++;
+    }
+    LOG("NULL\n");
   }
-  LOG("NULL\n");
 }
 
 void validate_heap() {
@@ -429,8 +495,9 @@ void validate_heap() {
   
   for (Chunk* c = gFirstChunk; c; c = c->next) {
     Block* b = find_first_block_in_chunk(c);
-    while (b) {
+    while (b && b->chunk == c) {
       if ((void*)b >= (void*)c + c->size) {
+        LOG("VALIDATE: current chunk: %p, current chunk bound: %p\n", c, (void*)c + c->size);
         LOG("CORRUPTED: block %p outside chunk bounds\n", b);
         abort();
       }
@@ -438,6 +505,16 @@ void validate_heap() {
         LOG("CORRUPTED: block %p wrong chunk ptr\n", b);
         abort();
       }
+
+      size_t header = b->size;             // includes ALLOC_BIT
+      size_t footer = *(size_t*)((char*)b + (header & SIZE_MASK) - sizeof(size_t));
+
+      if ((header & SIZE_MASK) != (footer & SIZE_MASK)) {
+        LOG("CORRUPTION: block %p header size=%zu footer size=%zu\n",
+              b, header & SIZE_MASK, footer & SIZE_MASK);
+        abort();
+      }
+
       total_size += block_size(b);
       prev = b;
       b = get_next_block(b);
@@ -487,4 +564,9 @@ Block* get_prev_block(Block* block) {
   }
 
   return (Block*)((char*) block - prev_size);
+}
+
+size_t get_list_index(size_t size) {
+  size_t index = (size / 8) - 1;
+  return index >= N_LISTS ? N_LISTS - 1 : index;
 }

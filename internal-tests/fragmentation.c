@@ -24,8 +24,8 @@ static void update_stats(void) {
   curr_payload = 0;
   for (Block* b = get_start_block(); b; b = get_next_block(b)) {
     if (!is_free(b)) {
-      curr_allocated += b->size;
-      curr_payload += b->size - kMetadataSize;
+      curr_allocated += block_size(b);
+      curr_payload += block_size(b) - kMetadataSize - sizeof(size_t);
     }
   }
   peak_allocated = (curr_allocated > peak_allocated) ? curr_allocated : peak_allocated;
@@ -61,7 +61,7 @@ void random_allocations() {
 int main(int argc, char const *argv[]) {
   unsigned int seed; 
   if (argc < 2) {
-    seed = (unsigned int) time(NULL); 
+    seed = (unsigned int) 1736962967; 
   } else {
     sscanf(argv[1], "%u", &seed); 
   }

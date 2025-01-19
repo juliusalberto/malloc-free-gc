@@ -13,7 +13,6 @@
 #endif
 
 #define N_LISTS 59
-#define FENCEPOST_MAGIC 0xDEADBEEF
 
 #define ADD_BYTES(ptr, n) ((void *) (((char *) (ptr)) + (n)))
 
@@ -21,10 +20,6 @@ typedef struct Chunk {
   size_t size;
   struct Chunk* next;
 } Chunk;
-
-typedef struct Fence_post {
-  size_t magic;
-} Fence_post;
 
 
 /** This is the Block struct, which contains all metadata needed for your 
@@ -60,8 +55,6 @@ extern const size_t kMetadataSize;
 extern const size_t kMaxAllocationSize;
 // Memory size that is mmapped (64 MB)
 extern const size_t kMemorySize;
-extern void *gFirstChunk;
-extern void* gLastChunk;
 
 void *my_malloc(size_t size);
 void my_free(void *p);
@@ -75,6 +68,5 @@ Block *get_start_block(void);
 Block *get_next_block(Block *block);
 
 Block *ptr_to_block(void *ptr);
-Block* find_first_block_in_chunk(Chunk* chunk);
 
 #endif

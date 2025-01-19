@@ -1,16 +1,21 @@
 #include "src/mygc.h"
 #include <string.h>
+#include <assert.h>
 
-/** This is a template file for you to use for testing your garbage collector
- *  implementation. 
- *  It is up to you to determine how to effectively test your GC code.
- * 
- *  If you are not planning on implementing the garbage collector you may ignore
- *  this file.
- */
+// Helper function to count currently allocated blocks
+size_t count_allocated_blocks() {
+  size_t count = 0;
+  Block *block = get_start_block();
+  
+  while (block) {
+    if (!is_free(block)) {
+        count++;
+    }
+    block = get_next_block(block);
+  }
+  return count;
+}
 
-// Version of your malloc that clears the block returned by malloc. To make sure when testing
-// that there aren't random values in the blocks which just so happen to be pointers to other blocks.
 void *my_calloc_gc(size_t size) {
   void *p = my_malloc(size);
   memset(p, 0, size);
@@ -19,13 +24,27 @@ void *my_calloc_gc(size_t size) {
 
 int main(void) {
   set_start_of_stack(__builtin_frame_address(0));
-  // Replace below with your own GC tests
 
+  // Test 1: Basic garbage collection test
   char *a = my_calloc_gc(8);
   char *b = my_calloc_gc(16);
+  
+  size_t blocks_before = count_allocated_blocks();
+  printf("Allocated blocks before GC: %zu\n", blocks_before);
+  
   b = NULL;
-
+  
+  // Run garbage collection
   my_gc();
-
-  // At this point the block "b" should have been freed as garbage as no pointers exist to it anymore
+  
+  // Count blocks after GC
+  size_t blocks_after = count_allocated_blocks();
+  printf("Allocated blocks after GC: %zu\n", blocks_after);
+  assert(blocks_after == blocks_before - 1);
+  
+  // Test 2: Verify that a is still accessible
+  a[0] = 'X'; 
+  
+  printf("GC test passed successfully!\n");
+  return 0;
 }

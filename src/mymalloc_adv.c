@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stddef.h>
+#define FENCEPOST_MAGIC 0xDEADBEEF
 #define RED "\033[31m"
 #define GREEN "\033[32m"
 #define RESET "\033[0m"
@@ -40,6 +41,12 @@ Block *get_prev_block(Block *block);
 void coalesce_block(Block* block);
 size_t get_list_index(size_t size);
 
+
+typedef struct Fence_post {
+  size_t magic;
+} Fence_post;
+
+
 // Word alignment
 const size_t kAlignment = sizeof(size_t);
 // Minimum allocation size (1 word)
@@ -53,8 +60,10 @@ const size_t kMaxAllocationSize = (128ull << 20) - kMetadataSize - kBoundarySize
 // Memory size that is mmapped (64 MB)
 const size_t kMemorySize = (64ull << 20);
 
-void *gFirstChunk = NULL;
-void* gLastChunk = NULL;
+
+
+static void *gFirstChunk = NULL;
+static void* gLastChunk = NULL;
 static Block* free_list_head = NULL;
 Block* free_lists[N_LISTS] = {NULL};
 

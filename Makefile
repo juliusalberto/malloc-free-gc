@@ -28,7 +28,7 @@ MALLOC_OBJ=$(MALLOC:%=src/%.o)
 INTERNAL_TEST_SRCS=$(shell find internal-tests -name '*.c')
 INTERNAL_TESTS=$(INTERNAL_TEST_SRCS:%.c=%)
 
-all: $(MALLOC)
+all: $(MALLOC) mygc
 
 # ===================== Build mymalloc as a shared library =====================
 
@@ -36,6 +36,18 @@ $(MALLOC): $(MALLOC_OBJ) | $(ODIR)/
 	"$(CC)" $(CFLAGS) $(LIBFLAGS) -o $(ODIR)/lib$(MALLOC).$(DYLIB_EXT) $<
 
 $(MALLOC_OBJ): %  : src/$(MALLOC).c
+	"$(CC)" $(CFLAGS) -c -o $@ $<
+
+# ============================================================================
+# [ NEW ] Build a separate "mygc" library from mygc.c
+# ============================================================================
+MYGC = mygc
+MYGC_OBJ = $(MYGC:%=src/%.o)
+
+mygc: $(MYGC_OBJ) | $(ODIR)/
+	"$(CC)" $(CFLAGS) $(LIBFLAGS) -o $(ODIR)/lib$(MYGC).$(DYLIB_EXT) $(MYGC_OBJ)
+
+$(MYGC_OBJ): % : src/$(MYGC).c
 	"$(CC)" $(CFLAGS) -c -o $@ $<
 
 # ======== Build Test files using library specified in MALLOC variable =========
@@ -70,6 +82,15 @@ bench/benchmark.o : bench/benchmark.c
 
 $(ODIR)/:
 	mkdir -p $(ODIR)
+
+# ============================================================================
+# [ NEW ] Example: Build a special test ("mygctest") that needs both libraries
+# ============================================================================
+mygctest: mygctest.o | $(MALLOC) mygc
+	"$(CC)" $(CFLAGS) $(TESTFLAGS) $< -l$(MYGC) -l$(MALLOC) -o $@ -Wl,-rpath,"`pwd`"/$(ODIR)
+
+tests/mygctest.o: mygctest.c
+	"$(CC)" $(CFLAGS) -c -o $@ $<
 
 .PHONY: clean
 clean:

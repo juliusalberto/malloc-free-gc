@@ -64,7 +64,6 @@ void coalesce_block(Block* block);
 size_t get_list_index(size_t size);
 static void sweep_phase(void);
 
-// Call this function in your test code (at the start of main)
 void set_start_of_stack(void *start_addr) {
   start_of_stack = start_addr;
 }

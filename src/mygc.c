@@ -278,7 +278,7 @@ static void sweep_phase() {
     Block* curr_block = find_first_block_in_chunk(curr_chunk);
 
     while (curr_block && curr_block->chunk == curr_chunk) {
-      // if already marked, we free it
+      // if not marked (which means that it is unreachable from stack) we free it
       Block* next = get_next_block(curr_block);
       if (!is_free(curr_block) && !is_marked(curr_block)) {
         my_free((char*) curr_block + kMetadataSize);
